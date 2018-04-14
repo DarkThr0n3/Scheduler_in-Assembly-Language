@@ -1,0 +1,279 @@
+T0	equ	0xE0004000	; Timer 0 Base Address
+T1	equ	0xE0008000
+
+IR	equ	0		; Add this to a timer'ss base address to get actual register address
+TCR	equ	4
+MCR	equ	0x14
+MR0	equ	0x18
+
+TimerCommandReset		equ	2
+TimerCommandRun			equ	1
+TimerModeResetAndInterrupt	equ	3
+TimerResetTimer0Interrupt	equ	1
+TimerResetAllInterrupts	equ	0xFF
+
+; VIC Stuff -- UM, Table 41
+VIC		equ	0xFFFFF000	; VIC Base Address
+IntEnable	equ	0x10
+VectAddr	equ	0x30
+VectAddr0	equ	0x100	; fixed -- was 0x30 in the lecture
+VectCtrl0	equ	0x200
+
+Timer0ChannelNumber	equ	4	; UM, Table 63
+Timer0Mask		equ	1<<Timer0ChannelNumber	; UM, Table 63
+IRQslot_en		equ	5		; UM, Table 58
+
+IO1DIR	EQU	0xE0028018
+IO1SET	EQU	0xE0028014
+IO1CLR	EQU	0xE002801C
+
+	AREA	InitialisationAndMain, CODE, READONLY
+	IMPORT	main
+
+	EXPORT	start
+start
+; initialisation code
+	mov	r0,#0
+	ldr	r1,=check
+	str	r0,[r1]	       		;Initializing for zero for no thread
+
+; initialise thread1 data space 
+
+                                                 ;4 is 4 by the way bro
+	ldr	r1,=thread1
+
+	ldr	r2,=t1prog		; first instruction of program 1
+	str	r2,[r1,#4+15*4]		; initial program counter value ---------->>>4 +15* 4
+
+	add	r2,r1,#threadSpace
+	str	r2,[r1,#4+13*4]	; initial stack pointer (r13) value
+
+	mov	r2,#0x00000010		; user mode, all other bits zeroed
+	str	r2,[r1,#4+16*4]		; initial CPSR ------------------------->>>>4 +16*4
+
+	ldr	r2,=thread2	   	; make the 'next' thread t2
+	str	r2,[r1,#0]   ;value 0
+
+; initialise thread2 data space
+
+	ldr	r1,=thread2
+
+	ldr	r2,=t2prog		; first instruction of program 2
+	str	r2,[r1,#pcs]		; initial program counter
+
+	add	r2,r1,#threadSpace
+	str	r2,[r1,#4+13*4]	; initial stack pointer (r13) value
+
+	mov	r2,#0x00000010		; user mode, all other bits zeroed
+	str	r2,[r1,#4+16*4]		; initial CPSR
+
+	ldr	r2,=thread1		; make the 'next' thread t1
+	str	r2,[r1,#0]
+
+; Initialise the VIC
+
+	ldr	r0,=VIC			; looking at the VIC
+
+	ldr	r1,=irqhan
+	str	r1,[r0,#VectAddr0] 	; associate our interrupt handler with Vectored Interrupt 0
+
+	mov	r1,#Timer0ChannelNumber+(1<<IRQslot_en)
+	str	r1,[r0,#VectCtrl0] 	; make Timer 0 interrupts the source of Vectored Interrupt 0
+
+	mov	r1,#Timer0Mask
+	str	r1,[r0,#IntEnable]	; enable Timer 0 interrupts to be recognised by the VIC
+
+	mov	r1,#0
+	str	r1,[r0,#VectAddr]   	; remove any pending interrupt (may not be needed)
+
+; Initialise Timer 0
+
+	ldr	r0,=T0			; looking at Timer 0
+
+	mov	r1,#TimerCommandReset
+	str	r1,[r0,#TCR]		; reset and stop counting
+
+	mov	r1,#TimerResetAllInterrupts
+	str	r1,[r0,#IR]	   	; remove any pending interrupt requests
+
+	ldr	r1,=(14745600/200)-1	; 5 ms = 1/200 second
+	str	r1,[r0,#MR0]
+
+	mov	r1,#TimerModeResetAndInterrupt
+	str	r1,[r0,#MCR]		; reset count and generate an interrupt each time
+
+	mov	r1,#TimerCommandRun
+	str	r1,[r0,#TCR]		; Start timer
+
+m0	b	m0  			; End of main program. Loop until an interrupt.
+
+; Initialisation is finished, now do the "application" part of the program -- make the LEDs light in sequence
+
+t1prog
+; this is almost a direct copy of the "application" part of the walking LEDs program
+; Initialise GPIO for the four LEDs
+	ldr	r1,=IO1DIR
+	ldr	r2,=0x000f0000		; select P1.19--P1.16
+	str	r2,[r1]			; make them outputs
+	ldr	r1,=IO1SET
+	str	r2,[r1]			; set them to turn the LEDs off
+
+	ldr	r2,=IO1CLR
+; r1 points to the SET register
+; r2 points to the CLEAR register
+	ldr	r5,=0x00100000	; end when the mask reaches this value
+wloop	ldr	r3,=0x00010000	; start with P1.16.
+floop	str	r3,[r2]	   	; clear the bit -> turn on the LED
+
+; delay for exactly a second
+	ldr	r4,=count
+	ldr	r6,[r4]
+	add	r6,r6,#1000/5	; one second
+	;r6 now has the value the counter will have in 200 more ticks, i.e. a second
+dloop	ldr	r7,[r4]		; current count
+	cmp	r6,r7		; same?
+	bne	dloop		; loop if not
+
+	str	r3,[r1]		; set the bit -> turn off the LED
+	mov	r3,r3,lsl #1	; shift up to next bit. P1.16 -> P1.17 etc.
+	cmp	r3,r5
+	bne	floop
+	b	wloop  		; branch always
+; Program execution will never drop below the statement above.
+
+t2prog
+; This is from the seven-segment display practical.
+; The labels have been changed to make them unique
+IO0DIR	EQU	0xE0028008
+IO0SET	EQU	0xE0028004
+IO0CLR	EQU	0xE002800C
+
+; The follow equates describe how each each segment is connected to a pin on port P0.
+; You may have to change them to reflect the actual wiring you have chosen on your board
+
+
+	ldr	r1,=IO0DIR
+;select the pins that are driving the segments & d.p.
+	ldr	r2,=0x000fff00
+	str	r2,[r1]		;make them outputs
+
+	ldr	r1,=IO0SET
+	ldr	r2,=IO0CLR
+; r1 points to the SET register
+; r2 points to the CLEAR register
+	ldr	r5,=lut		; point to the look-up table
+w2loop	mov	r0,#0		; start with 0
+
+f2loop	ldr	r3,[r5,r0,lsl #2]	; pick up the 7-seg code for this number
+	str	r3,[r1]		; turn segments on
+
+;delay for about a half second
+	ldr	r4,=5000000/2	; divide by two because the thread only gets half the time
+d2loop	subs	r4,r4,#1
+	bne	d2loop
+
+	str	r3,[r2]		; turn segments off
+
+	add	r0,#1
+	cmp	r0,#0xf		; only doing up as far as 3 (so 4 is too far...)s
+	bne	f2loop
+
+	b	w2loop
+
+
+lut	dcd	0x7100;F
+	dcd 0x7900;E
+	dcd	0x5E00;D
+	dcd	0x3900;C
+	dcd 0x7c00;B
+	dcd 0x7700;A
+	dcd 0x6700;9
+	dcd 0x7f00;8
+	dcd 0x0700;7
+	dcd 0x7b00;6
+	dcd 0x6b00;5
+	dcd 0x6600;4
+	dcd 0x4f00;3
+	dcd 0x5b00;2
+	dcd 0x0600;1
+	dcd	0x3f00;0
+;etc for all 10 (or all 16) digits
+
+
+
+	AREA	InterruptStuff, CODE, READONLY
+
+irqhan	sub	lr,lr,#4	
+	stmfd	sp!,{r0-r2}	
+	
+	ldr	r1,=check
+	ldr	r0,[r1]		
+	cmp	r0,#0		
+	bne	irq00		
+	add	sp,#3*4	    ;3 registers
+	ldr	r0,=thread1	
+	b	irq01		
+
+irq00
+	str	lr,[r0,#pcs]
+	
+	add	r2,r0,#4+3*4	  ; move 4 words ahead
+	;stmea r2!, {}
+	stmia	r2,{r3-r14}^	;incremend afterwards
+	add	r2,r0,#4 	     ;add 4
+	ldmfd	sp!,{r3-r5}	;can be any register
+	stmia	r2,{r3-r5}	
+	mrs	r3, spsr
+	str	r3,[r0,#cpsrs]	
+
+	ldr	r0,[r0,#next]	;Switch happens
+
+irq01
+	str	r0,[r1]		; make it the new current thread
+
+; Here, update the counter and acknowledge the interrupts
+	ldr	r2,=count
+	ldr	r3,[r2]	    	; get the count
+	add	r3,#1	      	; increment it
+	str	r3,[r2]		; save updated count
+
+;Same code
+	ldr	r2,=T0
+	mov	r3,#TimerResetTimer0Interrupt
+	str	r3,[r2,#IR]	; remove MR0 interrupt request from timer
+
+	ldr	r2,=VIC
+	mov	r3,#0
+	str	r3,[r2,#VectAddr]	; reset VIC
+
+
+
+
+
+; Now get ready to restore the newly switched thread
+	ldr	r3,[r0,#cpsrs]	; get the old spsr
+	msr	spsr_cxsf,r3	; put it in as the current spsr
+	ldr	lr,[r0,#pcs]	; get the return address into the link register
+	add	r2,r0,#4
+	ldmia	r2,{r0-r14}^	; restore user registers
+	nop			; allow time for h/w to recover
+	movs	pc,lr	    	; restore PC & CPSR, i.e. dispatch thread
+
+	AREA	Stuff, DATA, READWRITE
+count	dcd	0
+
+; equates for accessing fields in the threads' data spaces
+next	equ	0
+pcs	equ	4+15*4	; offset to where the PC storage is
+cpsrs	equ	4+16*4	; offset to where the CPSR storage is
+
+; size of each thread's space
+threadSpace	equ	1024
+thread1	space	1024    ; private storage for thread 1
+thread2	space	1024	; private storage for thread 2
+
+; pointer to the current thread's space
+
+check	space	4		; pointer to private storage of current thread
+
+	END
